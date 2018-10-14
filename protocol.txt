@@ -1,0 +1,60 @@
+command
+{
+    "command": <cmd_enum>
+}
+
+get_commandline
+{
+    "status": <enum>,
+    "commandline": "<commandline>"
+}
+
+get_modules
+{
+    "status": <enum>,
+    "modules": [
+        {"start": "<start>", "end": "<end>", "name": "<name>"}
+        {"start": "<start>", "end": "<end>", "name": "<name>"}
+    ]
+}
+
+get_registers
+{
+    "status": <enum>,
+    "registers: {
+        "rax": <rax>
+        "rbx": <rbx>
+        "rcx": <rcx>
+        "rdx": <rdx>
+        ...
+    }
+}
+
+get_bytes
+{
+    "status": <enum>,
+    "bytes": "<base64-bytes>"
+}
+
+set_breakpoint
+{
+    "status": <enum>
+}
+
+go
+{
+    "status": <enum>,
+    "output": "<stdout-or-stderr>"
+}
+
+next_instruction
+{
+    "status": <enum>,
+    "output": "<stdout-or-stderr>"
+}
+
+step_instruction
+{
+    "status": <enum>,
+    "output": "<stdout-or-stderr>"
+}
