@@ -21,6 +21,9 @@ import socket
 import string
 import struct
 
+import binascii
+import capstone
+
 STRING_PRINTABLE = string.digits + string.ascii_letters + string.punctuation + " "
 BYTES_PRINTABLE = STRING_PRINTABLE.encode("utf-8")
 AMD64_MAX_INSTR_SIZE = 15
@@ -364,9 +367,14 @@ class RdbShell(cmd.Cmd):
         else:
             address = self.target.registers["rip"]
 
-        self.target.get_bytes(address, AMD64_MAX_INSTR_SIZE * 8)
+        code = self.target.get_bytes(address, AMD64_MAX_INSTR_SIZE * 8)
 
-        # TODO: Disassemble bytes
+        md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+        for inst in list(md.disasm(code, address))[:8]:
+            inst_bytes = binascii.hexlify(inst.bytes).decode("utf-8")
+            line = "{:08x}:{:08x} {:16s}{:8s}{:s}"
+            print(line.format(inst.address >> 32, inst.address & 0xffffffff,
+                              inst_bytes, inst.mnemonic, inst.op_str))
 
     def do_bp(self, arg):
         """The bp command sets a software breakpoint."""
