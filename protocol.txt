@@ -41,20 +41,17 @@ set_breakpoint
     "status": <enum>
 }
 
+# stopval is exit status on exit or signal enum on stopped
 go
 {
     "status": <enum>,
-    "output": "<stdout-or-stderr>"
-}
-
-next_instruction
-{
-    "status": <enum>,
-    "output": "<stdout-or-stderr>"
+    "stopval": <enum>,
+    "exited": <bool>
 }
 
 step_instruction
 {
     "status": <enum>,
-    "output": "<stdout-or-stderr>"
+    "stopval": <enum>,
+    "exited": <bool>
 }

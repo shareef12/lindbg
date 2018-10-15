@@ -1,14 +1,15 @@
 /**
  * TODO:
  *  - finish implementing handlers
- *  - handle IO for child process
  *
  *  - Check for allocation errors on json_* functions
  *  - python code check status retval in properties
  *  - remove -g from Makefile
  *
+ *  - add support for signals in the child process
  *  - set_bytes (eb, ew, ed commands)
  *  - set_registers (r @eax=<val> commands)
+ *  - breakpoint manipulation (bd, be, bc commands)
  */
 #include <b64/cencode.h>
 #include <jansson.h>
@@ -45,7 +46,6 @@ enum {
     CMD_GET_BYTES,
     CMD_SET_BREAKPOINT,
     CMD_GO,
-    CMD_NEXT_INSTRUCTION,
     CMD_STEP_INSTRUCTION,
 } cmd_t;
 
@@ -379,25 +379,71 @@ static void handle_set_breakpoint(int sfd, pid_t pid, json_t *json)
 
 static void handle_go(int sfd, pid_t pid, json_t *json)
 {
-    (void)sfd;
-    (void)pid;
-    (void)json;
-}
+    int retval = 0;
+    int status = 0;
+    json_t *root = NULL;
 
+    UNREFERENCED_PARAMETER(json);
 
-static void handle_next_instruction(int sfd, pid_t pid, json_t *json)
-{
-    (void)sfd;
-    (void)pid;
-    (void)json;
+    retval = ptrace(PTRACE_CONT, pid, NULL, NULL);
+    if (retval != 0) {
+        send_status(sfd, retval);
+        return;
+    }
+
+    // wait for the child to get a signal
+    if (waitpid(pid, &status, 0) == -1) {
+        send_status(sfd, errno);
+        return;
+    }
+
+    root = json_object();
+    json_object_set_new(root, "status", json_integer(retval));
+    if (WIFEXITED(status)) {
+        json_object_set_new(root, "stopval", json_integer(WEXITSTATUS(status)));
+        json_object_set_new(root, "exited", json_true());
+    }
+    else if (WIFSTOPPED(status)) {
+        json_object_set_new(root, "stopval", json_integer(WSTOPSIG(status)));
+        json_object_set_new(root, "exited", json_false());
+    }
+    send_json(sfd, root);
+    json_decref(root);
 }
 
 
 static void handle_step_instruction(int sfd, pid_t pid, json_t *json)
 {
-    (void)sfd;
-    (void)pid;
-    (void)json;
+    int retval = 0;
+    int status = 0;
+    json_t *root = NULL;
+
+    UNREFERENCED_PARAMETER(json);
+
+    retval = ptrace(PTRACE_SINGLESTEP, pid, NULL, NULL);
+    if (retval != 0) {
+        send_status(sfd, retval);
+        return;
+    }
+
+    // wait for the child to get a signal
+    if (waitpid(pid, &status, 0) == -1) {
+        send_status(sfd, errno);
+        return;
+    }
+
+    root = json_object();
+    json_object_set_new(root, "status", json_integer(retval));
+    if (WIFEXITED(status)) {
+        json_object_set_new(root, "stopval", json_integer(WEXITSTATUS(status)));
+        json_object_set_new(root, "exited", json_true());
+    }
+    else if (WIFSTOPPED(status)) {
+        json_object_set_new(root, "stopval", json_integer(WSTOPSIG(status)));
+        json_object_set_new(root, "exited", json_false());
+    }
+    send_json(sfd, root);
+    json_decref(root);
 }
 
 
@@ -445,9 +491,6 @@ static int run_debug_session(int sfd, pid_t pid)
             break;
         case CMD_GO:
             handle_go(sfd, pid, json);
-            break;
-        case CMD_NEXT_INSTRUCTION:
-            handle_next_instruction(sfd, pid, json);
             break;
         case CMD_STEP_INSTRUCTION:
             handle_step_instruction(sfd, pid, json);

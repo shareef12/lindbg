@@ -23,6 +23,7 @@ import struct
 
 STRING_PRINTABLE = string.digits + string.ascii_letters + string.punctuation + " "
 BYTES_PRINTABLE = STRING_PRINTABLE.encode("utf-8")
+AMD64_MAX_INSTR_SIZE = 15
 
 INTRO_TEXT_FMT = textwrap.dedent("""\
 
@@ -47,8 +48,7 @@ class RemoteTarget(object):
     CMD_GET_BYTES        = 4
     CMD_SET_BREAKPOINT   = 5
     CMD_GO               = 6
-    CMD_NEXT_INSTRUCTION = 7
-    CMD_STEP_INSTRUCTION = 8
+    CMD_STEP_INSTRUCTION = 7
 
     def __init__(self, sock):
         self.s = sock
@@ -85,7 +85,8 @@ class RemoteTarget(object):
         self._sendjson(params)
 
         response = self._recvjson()
-        if response is None or response["status"] != 0 or "commandline" not in response:
+        if (response is None or "status" not in response or
+            response["status"] != 0 or "commandline" not in response):
             return ""
 
         # quote arguments containing whitespace before returning the commandline
@@ -102,7 +103,8 @@ class RemoteTarget(object):
         self._sendjson(params)
 
         response = self._recvjson()
-        if response is None or response["status"] != 0 or "modules" not in response:
+        if (response is None or "status" not in response or
+            response["status"] != 0 or "modules" not in response):
             return []
 
         # convert module start and end addresses to ints
@@ -118,7 +120,8 @@ class RemoteTarget(object):
         self._sendjson(params)
 
         response = self._recvjson()
-        if response is None or response["status"] != 0 or "registers" not in response:
+        if (response is None or "status" not in response or
+            response["status"] != 0 or "registers" not in response):
             return {}
 
         return response["registers"]
@@ -130,7 +133,8 @@ class RemoteTarget(object):
         self._sendjson(params)
 
         response = self._recvjson()
-        if response is None or response["status"] != 0 or "bytes" not in response:
+        if (response is None or "status" not in response or
+            response["status"] != 0 or "bytes" not in response):
             return b""
 
         return base64.b64decode(response["bytes"])
@@ -152,30 +156,24 @@ class RemoteTarget(object):
         self._sendjson(params)
 
         response = self._recvjson()
-        if response is None or response["status"] != 0:
-            return False
+        if (response is None or "status" not in response or
+            response["status"] != 0 or "stopval" not in response or
+            "exited" not in response):
+            return True, -1
 
-        # TODO: parse results
-
-    def next_instruction(self):
-        params = {"command": RemoteTarget.CMD_NEXT_INSTRUCTION}
-        self._sendjson(params)
-
-        response = self._recvjson()
-        if response is None or response["status"] != 0:
-            return False
-
-        # TODO: parse results
+        return response["exited"], response["stopval"]
 
     def step_instruction(self):
         params = {"command": RemoteTarget.CMD_STEP_INSTRUCTION}
         self._sendjson(params)
 
         response = self._recvjson()
-        if response is None or response["status"] != 0:
-            return False
+        if (response is None or "status" not in response or
+            response["status"] != 0 or "stopval" not in response or
+            "exited" not in response):
+            return True, -1
 
-        # TODO: parse results
+        return response["exited"], response["stopval"]
 
     def close(self):
         try:
@@ -357,23 +355,44 @@ class RdbShell(cmd.Cmd):
 
     def do_u(self, arg):
         """The u command displays an assembly translation of the specified program code in memory."""
-        pass
+        if arg:
+            try:
+                address = int(arg, 16)
+            except ValueError:
+                print("Couldn't resolve error at '{:s}'".format(arg))
+                return
+        else:
+            address = self.target.registers["rip"]
+
+        self.target.get_bytes(address, AMD64_MAX_INSTR_SIZE * 8)
+
+        # TODO: Disassemble bytes
 
     def do_bp(self, arg):
         """The bp command sets a software breakpoint."""
-        pass
+        try:
+            address = int(arg, 16)
+        except ValueError:
+            print("Couldn't resolve error at '{:s}'".format(arg))
+            return
+        self.target.set_breakpoint(address)
 
     def do_p(self, arg):
         """The p command executes a single instruction. When subroutine calls occur, they are treated as a single step."""
+        #self.target.next_instruction()
         pass
 
     def do_t(self, arg):
         """The t command executes a single instruction. When subroutine calls occur, each of their steps is also traced."""
-        pass
+        exited, stopval = self.target.step_instruction()
+        if exited:
+            print("[+] Target exited with value: {:d}".format(stopval))
 
     def do_g(self, arg):
         """The g command starts executing the given process or thread."""
-        pass
+        exited, stopval = self.target.go()
+        if exited:
+            print("[+] Target exited with value: {:d}".format(stopval))
 
 
 def run_debug_session(ip, port):
