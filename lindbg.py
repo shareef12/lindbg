@@ -21,6 +21,9 @@ import socket
 import string
 import struct
 
+STRING_PRINTABLE = string.digits + string.ascii_letters + string.punctuation + " "
+BYTES_PRINTABLE = STRING_PRINTABLE.encode("utf-8")
+
 INTRO_TEXT_FMT = textwrap.dedent("""\
 
     Taco (R) Linux Debugger Version 0.1.0 AMD64
@@ -132,9 +135,10 @@ class RemoteTarget(object):
 
         return base64.b64decode(response["bytes"])
 
-    def set_breakpoint(self, addr=0, symbol=""):
+    def set_breakpoint(self, address):
         # TODO: params
-        params = {"command": RemoteTarget.CMD_SET_BREAKPOINT}
+        params = {"command": RemoteTarget.CMD_SET_BREAKPOINT,
+                  "address": address}
         self._sendjson(params)
 
         response = self._recvjson()
@@ -148,8 +152,8 @@ class RemoteTarget(object):
         self._sendjson(params)
 
         response = self._recvjson()
-        if response is None or response["status"] != 0 or "commandline" not in response:
-            return ""
+        if response is None or response["status"] != 0:
+            return False
 
         # TODO: parse results
 
@@ -159,7 +163,7 @@ class RemoteTarget(object):
 
         response = self._recvjson()
         if response is None or response["status"] != 0:
-            return ""
+            return False
 
         # TODO: parse results
 
@@ -169,7 +173,7 @@ class RemoteTarget(object):
 
         response = self._recvjson()
         if response is None or response["status"] != 0:
-            return ""
+            return False
 
         # TODO: parse results
 
@@ -242,7 +246,28 @@ class RdbShell(cmd.Cmd):
 
     def do_da(self, arg):
         """Display ASCII characters."""
-        pass
+        try:
+            address = int(arg, 16)
+        except ValueError:
+            print("Couldn't resolve error at '{:s}'".format(arg))
+            return
+
+        # receive data until a NULL terminator
+        data = b""
+        while True:
+            data += self.target.get_bytes(address, 128)
+            if b"\0" in data:
+                data = data[:data.index(b"\0")]
+                break
+
+        # replace non-printable bytes and print the string in 32-byte lines
+        data = "".join(chr(b) if b in BYTES_PRINTABLE else "." for b in data)
+        for i in range(0, len(data), 32):
+            chunk_address = address + i
+            chunk_ascii = data[i:i+32]
+            line = "{:08x}`{:08x}  \"{:s}\""
+            print(line.format(chunk_address >> 32, chunk_address & 0xffffffff,
+                              chunk_ascii))
 
     def do_db(self, arg):
         """Display byte values and ASCII characters."""
@@ -255,12 +280,10 @@ class RdbShell(cmd.Cmd):
         data = self.target.get_bytes(address, 128)
 
         # print hexdump of data in 16-byte lines
-        printable = string.digits + string.ascii_letters + string.punctuation   # no whitespace
-        bytes_printable = printable.encode("utf-8")
         for i in range(0, 128, 16):
             chunk_address = address + i
             chunk_bytes = ["{:02x}".format(b) for b in data[i:i+16]]
-            chunk_ascii = [chr(b) if b in bytes_printable else "." for b in data[i:i+16]]
+            chunk_ascii = [chr(b) if b in BYTES_PRINTABLE else "." for b in data[i:i+16]]
             line = "{:08x}`{:08x}  {:s}-{:s}  {:s}"
             print(line.format(chunk_address >> 32, chunk_address & 0xffffffff,
                               " ".join(chunk_bytes[:8]), " ".join(chunk_bytes[8:]),
@@ -268,15 +291,69 @@ class RdbShell(cmd.Cmd):
 
     def do_dw(self, arg):
         """Display word values (2 bytes)."""
-        pass
+        try:
+            address = int(arg, 16)
+        except ValueError:
+            print("Couldn't resolve error at '{:s}'".format(arg))
+            return
+
+        data = self.target.get_bytes(address, 128)
+
+        # print hexdump of data in 16-byte lines
+        for i in range(0, 128, 16):
+            chunk_address = address + i
+            chunk = data[i:i+16]
+            chunk_words = []
+            for j in range(0, 16, 2):
+                chunk_words.append(struct.unpack("<H", chunk[j:j+2])[0])
+            chunk_words = ["{:04x}".format(w) for w in chunk_words]
+            line = "{:08x}`{:08x}  {:s}"
+            print(line.format(chunk_address >> 32, chunk_address & 0xffffffff,
+                              " ".join(chunk_words)))
 
     def do_dd(self, arg):
         """Display double-word values (4 bytes)."""
-        pass
+        try:
+            address = int(arg, 16)
+        except ValueError:
+            print("Couldn't resolve error at '{:s}'".format(arg))
+            return
+
+        data = self.target.get_bytes(address, 128)
+
+        # print hexdump of data in 16-byte lines
+        for i in range(0, 128, 16):
+            chunk_address = address + i
+            chunk = data[i:i+16]
+            chunk_dwords = []
+            for j in range(0, 16, 4):
+                chunk_dwords.append(struct.unpack("<I", chunk[j:j+4])[0])
+            chunk_dwords = ["{:08x}".format(d) for d in chunk_dwords]
+            line = "{:08x}`{:08x}  {:s}"
+            print(line.format(chunk_address >> 32, chunk_address & 0xffffffff,
+                              " ".join(chunk_dwords)))
 
     def do_dq(self, arg):
         """Display quad-word values (8 bytes)."""
-        pass
+        try:
+            address = int(arg, 16)
+        except ValueError:
+            print("Couldn't resolve error at '{:s}'".format(arg))
+            return
+
+        data = self.target.get_bytes(address, 128)
+
+        # print hexdump of data in 16-byte lines
+        for i in range(0, 128, 16):
+            chunk_address = address + i
+            chunk = data[i:i+16]
+            chunk_qwords = []
+            for j in range(0, 16, 8):
+                chunk_qwords.append(struct.unpack("<Q", chunk[j:j+8])[0])
+            chunk_qwords = ["{:08x}`{:08x}".format(q >> 32, q & 0xffffffff) for q in chunk_qwords]
+            line = "{:08x}`{:08x}  {:s}"
+            print(line.format(chunk_address >> 32, chunk_address & 0xffffffff,
+                              " ".join(chunk_qwords)))
 
     def do_u(self, arg):
         """The u command displays an assembly translation of the specified program code in memory."""
