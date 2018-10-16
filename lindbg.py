@@ -25,7 +25,7 @@ import binascii
 import capstone
 
 STRING_PRINTABLE = string.digits + string.ascii_letters + string.punctuation + " "
-BYTES_PRINTABLE = STRING_PRINTABLE.encode("utf-8")
+BYTES_PRINTABLE = STRING_PRINTABLE.encode("ascii")
 AMD64_MAX_INSTR_SIZE = 15
 
 INTRO_TEXT_FMT = textwrap.dedent("""\
@@ -49,7 +49,7 @@ class RemoteTarget(object):
     CMD_GET_MODULES      = 2
     CMD_GET_REGISTERS    = 3
     CMD_GET_BYTES        = 4
-    CMD_SET_BREAKPOINT   = 5
+    CMD_SET_BYTES        = 5
     CMD_GO               = 6
     CMD_STEP_INSTRUCTION = 7
 
@@ -89,7 +89,7 @@ class RemoteTarget(object):
 
         response = self._recvjson()
         if (response is None or "status" not in response or
-            response["status"] != 0 or "commandline" not in response):
+                response["status"] != 0 or "commandline" not in response):
             return ""
 
         # quote arguments containing whitespace before returning the commandline
@@ -107,7 +107,7 @@ class RemoteTarget(object):
 
         response = self._recvjson()
         if (response is None or "status" not in response or
-            response["status"] != 0 or "modules" not in response):
+                response["status"] != 0 or "modules" not in response):
             return []
 
         # convert module start and end addresses to ints
@@ -124,7 +124,7 @@ class RemoteTarget(object):
 
         response = self._recvjson()
         if (response is None or "status" not in response or
-            response["status"] != 0 or "registers" not in response):
+                response["status"] != 0 or "registers" not in response):
             return {}
 
         return response["registers"]
@@ -137,15 +137,15 @@ class RemoteTarget(object):
 
         response = self._recvjson()
         if (response is None or "status" not in response or
-            response["status"] != 0 or "bytes" not in response):
+                response["status"] != 0 or "bytes" not in response):
             return b""
 
         return base64.b64decode(response["bytes"])
 
-    def set_breakpoint(self, address):
-        # TODO: params
-        params = {"command": RemoteTarget.CMD_SET_BREAKPOINT,
-                  "address": address}
+    def set_bytes(self, address, data):
+        params = {"command": RemoteTarget.CMD_SET_BYTES,
+                  "address": address,
+                  "data": base64.b64encode(data).decode("ascii")}
         self._sendjson(params)
 
         response = self._recvjson()
@@ -160,8 +160,8 @@ class RemoteTarget(object):
 
         response = self._recvjson()
         if (response is None or "status" not in response or
-            response["status"] != 0 or "stopval" not in response or
-            "exited" not in response):
+                response["status"] != 0 or "stopval" not in response or
+                "exited" not in response):
             return True, -1
 
         return response["exited"], response["stopval"]
@@ -172,8 +172,8 @@ class RemoteTarget(object):
 
         response = self._recvjson()
         if (response is None or "status" not in response or
-            response["status"] != 0 or "stopval" not in response or
-            "exited" not in response):
+                response["status"] != 0 or "stopval" not in response or
+                "exited" not in response):
             return True, -1
 
         return response["exited"], response["stopval"]
@@ -186,17 +186,53 @@ class RemoteTarget(object):
         self.s.close()
 
 
+class Breakpoint(object):
+
+    def __init__(self, target, address):
+        self._target = target
+        self._address = address
+        self._enabled = False
+        self._orig_byte = b""
+
+    def __del__(self):
+        self.disable()
+
+    @property
+    def address(self):
+        return self._address
+
+    @property
+    def enabled(self):
+        return self._enabled
+
+    def enable(self):
+        if not self._enabled:
+            self._orig_byte = self._target.get_bytes(self._address, 1)
+            if len(self._orig_byte) != 1:
+                return False
+            self._target.set_bytes(self._address, b"\xcc")
+            self._enabled = True
+
+    def disable(self):
+        if self._enabled:
+            success = self._target.set_bytes(self._address, self._orig_byte)
+            if success:
+                self._orig_byte = b""
+                self._enabled = False
+
+
 class RdbShell(cmd.Cmd):
 
     def __init__(self, target):
         super().__init__()
-        self.target = target
+        self._target = target
+        self._breakpoints = []
         self.prompt = "0:000> "
 
     def cmdloop(self, intro=""):
         """Override cmdloop to provide a custom intro."""
-        intro = INTRO_TEXT_FMT.format(self.target.commandline)
-        for module in self.target.modules:
+        intro = INTRO_TEXT_FMT.format(self._target.commandline)
+        for module in self._target.modules:
             line = "ModLoad: {:08x}`{:08x} {:08x}`{:08x}   {:s}\n"
             intro += line.format(module["start"] >> 32, module["start"] & 0xffffffff,
                                  module["end"] >> 32, module["end"] & 0xffffffff,
@@ -206,7 +242,7 @@ class RdbShell(cmd.Cmd):
 
     def do_q(self, arg):
         """The q command ends the debugging session."""
-        self.target.close()
+        self._target.close()
         return True
 
     def do_shell(self, arg):
@@ -216,7 +252,7 @@ class RdbShell(cmd.Cmd):
     def do_lm(self, arg):
         """The lm command displays loaded modules."""
         print("start             end                 module name")
-        for module in self.target.modules:
+        for module in self._target.modules:
             if "/" in module["name"]:
                 module["name"] = module["name"].split("/")[-1]
             line = "{:08x}`{:08x} {:08x}`{:08x}   {:s}   (deferred)"
@@ -227,7 +263,7 @@ class RdbShell(cmd.Cmd):
 
     def do_r(self, arg):
         """The r command displays registers."""
-        regs = self.target.registers
+        regs = self._target.registers
         if arg:
             if arg in regs:
                 print("{:s}={:016x}".format(arg, regs[arg]))
@@ -256,7 +292,7 @@ class RdbShell(cmd.Cmd):
         # receive data until a NULL terminator
         data = b""
         while True:
-            data += self.target.get_bytes(address, 128)
+            data += self._target.get_bytes(address, 128)
             if b"\0" in data:
                 data = data[:data.index(b"\0")]
                 break
@@ -278,7 +314,7 @@ class RdbShell(cmd.Cmd):
             print("Couldn't resolve error at '{:s}'".format(arg))
             return
 
-        data = self.target.get_bytes(address, 128)
+        data = self._target.get_bytes(address, 128)
 
         # print hexdump of data in 16-byte lines
         for i in range(0, 128, 16):
@@ -298,7 +334,7 @@ class RdbShell(cmd.Cmd):
             print("Couldn't resolve error at '{:s}'".format(arg))
             return
 
-        data = self.target.get_bytes(address, 128)
+        data = self._target.get_bytes(address, 128)
 
         # print hexdump of data in 16-byte lines
         for i in range(0, 128, 16):
@@ -320,7 +356,7 @@ class RdbShell(cmd.Cmd):
             print("Couldn't resolve error at '{:s}'".format(arg))
             return
 
-        data = self.target.get_bytes(address, 128)
+        data = self._target.get_bytes(address, 128)
 
         # print hexdump of data in 16-byte lines
         for i in range(0, 128, 16):
@@ -342,7 +378,7 @@ class RdbShell(cmd.Cmd):
             print("Couldn't resolve error at '{:s}'".format(arg))
             return
 
-        data = self.target.get_bytes(address, 128)
+        data = self._target.get_bytes(address, 128)
 
         # print hexdump of data in 16-byte lines
         for i in range(0, 128, 16):
@@ -365,14 +401,14 @@ class RdbShell(cmd.Cmd):
                 print("Couldn't resolve error at '{:s}'".format(arg))
                 return
         else:
-            address = self.target.registers["rip"]
+            address = self._target.registers["rip"]
 
-        code = self.target.get_bytes(address, AMD64_MAX_INSTR_SIZE * 8)
+        code = self._target.get_bytes(address, AMD64_MAX_INSTR_SIZE * 8)
 
         md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
         for inst in list(md.disasm(code, address))[:8]:
-            inst_bytes = binascii.hexlify(inst.bytes).decode("utf-8")
-            line = "{:08x}:{:08x} {:16s}{:8s}{:s}"
+            inst_bytes = binascii.hexlify(inst.bytes).decode("ascii")
+            line = "{:08x}`{:08x} {:16s}{:8s}{:s}"
             print(line.format(inst.address >> 32, inst.address & 0xffffffff,
                               inst_bytes, inst.mnemonic, inst.op_str))
 
@@ -383,22 +419,108 @@ class RdbShell(cmd.Cmd):
         except ValueError:
             print("Couldn't resolve error at '{:s}'".format(arg))
             return
-        self.target.set_breakpoint(address)
+
+        # check for existing breakpoints with this address
+        for i, bp in enumerate(self._breakpoints):
+            if bp.address == address:
+                print("breakpoint {:d} redefined".format(i))
+                bp.enable()
+                return
+
+        # no previous breakpoint found for this address - create a new one
+        bp = Breakpoint(self._target, address)
+        bp.enable()
+
+        # insert the breakpoint if there's a slot, otherwise append to the list
+        for i, bp in enumerate(self._breakpoints):
+            if bp is None:
+                self._breakpoints[i] = bp
+                return
+        self._breakpoints.append(bp)
+
+    def do_be(self, arg):
+        """The be command restores one or more breakpoints that were previously disabled."""
+        if arg:
+            try:
+                idx = int(arg, 16)
+            except ValueError:
+                print("         ^ Syntax error in '{:s}'".format(arg))
+                return
+            if 0 <= idx < len(self._breakpoints) and self._breakpoints[idx]:
+                self._breakpoints[idx].enable()
+        else:
+            # enable all breakpoints
+            for bp in self._breakpoints:
+                if bp:
+                    bp.enable()
+
+    def do_bd(self, arg):
+        """The bd command disables, but does not delete, previously set breakpoints."""
+        if arg:
+            try:
+                idx = int(arg, 16)
+            except ValueError:
+                print("         ^ Syntax error in '{:s}'".format(arg))
+                return
+            if 0 <= idx < len(self._breakpoints) and self._breakpoints[idx]:
+                self._breakpoints[idx].disable()
+        else:
+            # disable all breakpoints
+            for bp in self._breakpoints:
+                if bp:
+                    bp.disable()
+
+    def do_bc(self, arg):
+        """The bc command permanently removes previously set breakpoints from the system."""
+        if arg:
+            try:
+                idx = int(arg, 16)
+            except ValueError:
+                print("         ^ Syntax error in '{:s}'".format(arg))
+                return
+            if 0 <= idx < len(self._breakpoints) and self._breakpoints[idx]:
+                self._breakpoints[idx] = None
+        else:
+            # clear all breakpoints
+            for i in range(len(self._breakpoints)):
+                self._breakpoints[i] = None
+
+    def do_bl(self, arg):
+        """The bl command lists information about existing breakpoints."""
+        for i, bp in enumerate(self._breakpoints):
+            if bp:
+                enabled = "e" if bp.enabled else "d"
+                line = "{:6d} {:s} Disable Clear  {:08x}`{:08x}     0001 (0001)  0:****"
+                print(line.format(i, enabled, bp.address >> 32, bp.address & 0xffffffff))
 
     def do_p(self, arg):
         """The p command executes a single instruction. When subroutine calls occur, they are treated as a single step."""
-        #self.target.next_instruction()
-        pass
+        # check to see if the current instruction is a call
+        address = self._target.registers["rip"]
+        code = self._target.get_bytes(address, AMD64_MAX_INSTR_SIZE)
+        md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+        inst = next(md.disasm(code, address))
+
+        if inst.mnemonic == "call":
+            bp = Breakpoint(self._target, inst.address + inst.size)
+            bp.enable()
+            exited, stopval = self._target.go()
+            del bp
+        else:
+            exited, stopval = self._target.step_instruction()
+
+        if exited:
+            print("[+] Target exited with value: {:d}".format(stopval))
 
     def do_t(self, arg):
         """The t command executes a single instruction. When subroutine calls occur, each of their steps is also traced."""
-        exited, stopval = self.target.step_instruction()
+        exited, stopval = self._target.step_instruction()
         if exited:
             print("[+] Target exited with value: {:d}".format(stopval))
 
     def do_g(self, arg):
         """The g command starts executing the given process or thread."""
-        exited, stopval = self.target.go()
+        exited, stopval = self._target.go()
         if exited:
             print("[+] Target exited with value: {:d}".format(stopval))
 

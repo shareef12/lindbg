@@ -2,6 +2,11 @@
  * TODO:
  *  - finish implementing handlers
  *
+ *  - implement set_registers to support breakpoints
+ *  - base64 encode argv in get_commandline
+ *  - print next instruction on p, t, and g
+ *
+ *
  *  - Check for allocation errors on json_* functions
  *  - python code check status retval in properties
  *  - remove -g from Makefile
@@ -9,8 +14,8 @@
  *  - add support for signals in the child process
  *  - set_bytes (eb, ew, ed commands)
  *  - set_registers (r @eax=<val> commands)
- *  - breakpoint manipulation (bd, be, bc commands)
  */
+#include <b64/cdecode.h>
 #include <b64/cencode.h>
 #include <jansson.h>
 
@@ -29,25 +34,86 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define _GNU_SOURCE
-#include <link.h>
-#include <dlfcn.h>
-#undef _GNU_SOURCE
-
 #define DEFAULT_BIND_IP     "localhost"
 #define DEFAULT_BIND_PORT   "4242"
 
 #define UNREFERENCED_PARAMETER(p)   ((void)(p))
+#define min(a,b)    (((a) < (b)) ? (a) : (b))
 
 enum {
     CMD_GET_COMMANDLINE = 1,
     CMD_GET_MODULES,
     CMD_GET_REGISTERS,
     CMD_GET_BYTES,
-    CMD_SET_BREAKPOINT,
+    CMD_SET_BYTES,
     CMD_GO,
     CMD_STEP_INSTRUCTION,
 } cmd_t;
+
+
+/**
+ * @brief Encode a string as base64.
+ * @param buffer Data to encode.
+ * @param buffer_size Size of the buffer to encode in bytes.
+ * @param output_size Size of the encoded buffer in bytes.
+ * @return A dynamically allocated buffer with the encoded data or NULL on
+ *         error. This buffer should be freed with `free` by the caller.
+ */
+char * base64_encode(const char *buffer, size_t buffer_size, size_t *output_size)
+{
+    char *buffer_b64 = NULL;
+    size_t b64_size = 0;
+    base64_encodestate ctx = {0};
+    size_t cnt = 0;
+
+    // base64 encoding requires an output buffer of 4*(n/3) bytes rounded up to
+    // a multiple of 4. Add 8 to simplify the rounding and ensure space for a
+    // newline and NULL terminator.
+    b64_size = 4 * (buffer_size / 3) + 8;
+    buffer_b64 = calloc(1, b64_size);
+    if (buffer_b64 == NULL) {
+        return NULL;
+    }
+
+    // base64 encode the data
+    base64_init_encodestate(&ctx);
+    cnt = base64_encode_block(buffer, buffer_size, buffer_b64, &ctx);
+    cnt += base64_encode_blockend(buffer_b64 + cnt, &ctx);
+
+    *output_size = cnt;
+    return buffer_b64;
+}
+
+
+/**
+ * @brief Decode a base64 string.
+ * @param buffer A base64 encoded buffer.
+ * @param buffer_size Size of the encoded buffer in bytes.
+ * @param output_size Size of the decoded buffer in bytes.
+ * @return A dynamically allocated buffer with the decoded data or NULL on
+ *         error. This buffer should be freed with `free` by the caller.
+ */
+char * base64_decode(const char *buffer, size_t buffer_size, size_t *output_size)
+{
+    char *buffer_str = NULL;
+    size_t str_size = 0;
+    base64_decodestate ctx = {0};
+    size_t cnt = 0;
+
+    // lazily use a buffer the same size as the input one for decoding.
+    str_size = buffer_size;
+    buffer_str = calloc(1, str_size);
+    if (buffer_str == NULL) {
+        return NULL;
+    }
+
+    // base64 decode the data
+    base64_init_decodestate(&ctx);
+    cnt = base64_decode_block(buffer, buffer_size, buffer_str, &ctx);
+
+    *output_size = cnt;
+    return buffer_str;
+}
 
 
 /**
@@ -110,6 +176,9 @@ static json_t * recv_json(int sfd)
 }
 
 
+/**
+ * @brief Send a JSON object with a single "status" value.
+ */
 static void send_status(int sfd, int status)
 {
     json_t *root = json_object();
@@ -313,13 +382,11 @@ static void handle_get_bytes(int sfd, pid_t pid, json_t *json)
     unsigned long long address = 0;
     unsigned long long size = 0;
     unsigned long long peek_size = 0;
-    unsigned long long b64_size = 0;
     char *buffer = NULL;
-    char *buffer_b64 = NULL;
     unsigned long long i = 0;
     long val = 0;
-    base64_encodestate ctx = {0};
-    int cnt = 0;
+    char *buffer_b64 = NULL;
+    size_t b64_size = 0;
     json_t *root = NULL;
 
     // get the address and size from the params
@@ -334,17 +401,10 @@ static void handle_get_bytes(int sfd, pid_t pid, json_t *json)
     size = json_integer_value(size_val);
 
     // round up to the nearest multiple of sizeof(long) for ptrace
-    // base64 encoding requires an output buffer of 4*(n/3) bytes rounded up to
-    // a multiple of 4. Add 8 to simplify the rounding and ensure space for a
-    // newline and NULL terminator.
     peek_size = size + (sizeof(long) - (size % sizeof(long)));
-    b64_size = 4 * (size / 3) + 8;
     buffer = calloc(1, peek_size);
-    buffer_b64 = calloc(1, b64_size);
-    if (buffer == NULL || buffer_b64 == NULL) {
+    if (buffer == NULL) {
         send_status(sfd, -1);
-        if (buffer != NULL) free(buffer);
-        if (buffer_b64 != NULL) free(buffer_b64);
         return;
     }
 
@@ -354,9 +414,12 @@ static void handle_get_bytes(int sfd, pid_t pid, json_t *json)
     }
 
     // base64 encode the data
-    base64_init_encodestate(&ctx);
-    cnt = base64_encode_block(buffer, size, buffer_b64, &ctx);
-    base64_encode_blockend(buffer_b64 + cnt, &ctx);
+    buffer_b64 = base64_encode(buffer, size, &b64_size);
+    if (buffer_b64 == NULL) {
+        send_status(sfd, -1);
+        free(buffer);
+        return;
+    }
 
     root = json_object();
     json_object_set_new(root, "status", json_integer(0));
@@ -364,16 +427,55 @@ static void handle_get_bytes(int sfd, pid_t pid, json_t *json)
     send_json(sfd, root);
     json_decref(root);
 
-    free(buffer);
     free(buffer_b64);
+    free(buffer);
 }
 
 
-static void handle_set_breakpoint(int sfd, pid_t pid, json_t *json)
+static void handle_set_bytes(int sfd, pid_t pid, json_t *json)
 {
-    (void)sfd;
-    (void)pid;
-    (void)json;
+    json_t *address_val = NULL;
+    json_t *data_b64_val = NULL;
+    unsigned long long address = 0;
+    const char *data_b64 = NULL;
+    char *data = NULL;
+    size_t data_size = 0;
+    unsigned long long poke_size = 0;
+    unsigned long long i = 0;
+    long val = 0;
+
+    // get the address and base64 encoded data from the params
+    address_val = json_object_get(json, "address");
+    data_b64_val = json_object_get(json, "data");
+    if (address_val == NULL || data_b64_val == NULL) {
+        send_status(sfd, -1);
+        return;
+    }
+
+    address = json_integer_value(address_val);
+    data_b64 = json_string_value(data_b64_val);
+
+    // base64 decode the data
+    data = base64_decode(data_b64, strlen(data_b64), &data_size);
+    if (data == NULL) {
+        send_status(sfd, -1);
+        return;
+    }
+
+    // round up to the nearest multiple of sizeof(long) for ptrace
+    poke_size = data_size + (sizeof(long) - (data_size % sizeof(long)));
+    for (i = 0; i < poke_size; i += sizeof(long)) {
+        val = ptrace(PTRACE_PEEKDATA, pid, address + i, NULL);
+        memcpy(&val, data + i, min(data_size - i, sizeof(val)));
+        if (ptrace(PTRACE_POKEDATA, pid, address + i, val) != 0) {
+            send_status(sfd, -1);
+            free(data);
+            return;
+        }
+    }
+
+    send_status(sfd, 0);
+    free(data);
 }
 
 
@@ -486,8 +588,8 @@ static int run_debug_session(int sfd, pid_t pid)
         case CMD_GET_BYTES:
             handle_get_bytes(sfd, pid, json);
             break;
-        case CMD_SET_BREAKPOINT:
-            handle_set_breakpoint(sfd, pid, json);
+        case CMD_SET_BYTES:
+            handle_set_bytes(sfd, pid, json);
             break;
         case CMD_GO:
             handle_go(sfd, pid, json);

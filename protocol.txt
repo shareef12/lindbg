@@ -36,7 +36,7 @@ get_bytes
     "bytes": "<base64-bytes>"
 }
 
-set_breakpoint
+set_bytes
 {
     "status": <enum>
 }
