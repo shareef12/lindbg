@@ -3,7 +3,6 @@
  *  - finish implementing handlers
  *
  *  - implement set_registers to support breakpoints
- *  - base64 encode argv in get_commandline
  *  - print next instruction on p, t, and g
  *
  *
@@ -44,6 +43,7 @@ enum {
     CMD_GET_COMMANDLINE = 1,
     CMD_GET_MODULES,
     CMD_GET_REGISTERS,
+    CMD_SET_REGISTERS,
     CMD_GET_BYTES,
     CMD_SET_BYTES,
     CMD_GO,
@@ -194,6 +194,8 @@ static void handle_get_commandline(int sfd, pid_t pid, json_t *json)
     FILE *fp = NULL;
     size_t nread = 0;
     char cmdline[2048] = {0};
+    char *cmdline_b64 = NULL;
+    size_t cmdline_b64_size = 0;
     json_t *root = NULL;
 
     UNREFERENCED_PARAMETER(json);
@@ -213,11 +215,19 @@ static void handle_get_commandline(int sfd, pid_t pid, json_t *json)
         return;
     }
 
+    cmdline_b64 = base64_encode(cmdline, nread, &cmdline_b64_size);
+    if (cmdline_b64 == NULL) {
+        send_status(sfd, -1);
+        return;
+    }
+
     root = json_object();
     json_object_set_new(root, "status", json_integer(0));
-    json_object_set_new(root, "commandline", json_stringn(cmdline, nread));
+    json_object_set_new(root, "commandline", json_string(cmdline_b64));
     send_json(sfd, root);
     json_decref(root);
+
+    free(cmdline_b64);
 }
 
 
@@ -372,6 +382,23 @@ static void handle_get_registers(int sfd, pid_t pid, json_t *json)
     json_object_set_new(root, "registers", registers);
     send_json(sfd, root);
     json_decref(root);
+}
+
+
+static void handle_set_registers(int sfd, pid_t pid, json_t *json)
+{
+    struct user_regs_struct regs = {0};
+
+    if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) != 0) {
+        perror("ptrace");
+        send_status(sfd, errno);
+        return;
+    }
+
+    // TODO: Implment handle_set_registers
+    (void)json;
+
+    send_status(sfd, 0);
 }
 
 
@@ -584,6 +611,9 @@ static int run_debug_session(int sfd, pid_t pid)
             break;
         case CMD_GET_REGISTERS:
             handle_get_registers(sfd, pid, json);
+            break;
+        case CMD_SET_REGISTERS:
+            handle_set_registers(sfd, pid, json);
             break;
         case CMD_GET_BYTES:
             handle_get_bytes(sfd, pid, json);

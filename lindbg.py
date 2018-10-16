@@ -48,10 +48,11 @@ class RemoteTarget(object):
     CMD_GET_COMMANDLINE  = 1
     CMD_GET_MODULES      = 2
     CMD_GET_REGISTERS    = 3
-    CMD_GET_BYTES        = 4
-    CMD_SET_BYTES        = 5
-    CMD_GO               = 6
-    CMD_STEP_INSTRUCTION = 7
+    CMD_SET_REGISTERS    = 4
+    CMD_GET_BYTES        = 5
+    CMD_SET_BYTES        = 6
+    CMD_GO               = 7
+    CMD_STEP_INSTRUCTION = 8
 
     def __init__(self, sock):
         self.s = sock
@@ -93,7 +94,8 @@ class RemoteTarget(object):
             return ""
 
         # quote arguments containing whitespace before returning the commandline
-        argv = response["commandline"].split("\0")
+        argv = base64.b64decode(response["commandline"]).decode("utf-8")
+        argv = argv.split("\0")
         for i in range(len(argv)):
             if any(c in argv[i] for c in string.whitespace):
                 argv[i] = '"{:s}"'.format(argv[i])
