@@ -1,14 +1,9 @@
 /**
  * TODO:
- *  - finish implementing handlers
- *
- *  - implement set_registers to support breakpoints
  *  - print next instruction on p, t, and g
- *
  *
  *  - Check for allocation errors on json_* functions
  *  - python code check status retval in properties
- *  - remove -g from Makefile
  *
  *  - add support for signals in the child process
  *  - set_bytes (eb, ew, ed commands)
@@ -374,8 +369,8 @@ static void handle_get_registers(int sfd, pid_t pid, json_t *json)
     json_object_set_new(registers, "fs", json_integer(regs.fs));
     json_object_set_new(registers, "gs", json_integer(regs.gs));
     json_object_set_new(registers, "ss", json_integer(regs.ss));
-    json_object_set_new(registers, "fsbase", json_integer(regs.fs_base));
-    json_object_set_new(registers, "gsbase", json_integer(regs.gs_base));
+    json_object_set_new(registers, "fs_base", json_integer(regs.fs_base));
+    json_object_set_new(registers, "gs_base", json_integer(regs.gs_base));
 
     root = json_object();
     json_object_set_new(root, "status", json_integer(0));
@@ -388,6 +383,14 @@ static void handle_get_registers(int sfd, pid_t pid, json_t *json)
 static void handle_set_registers(int sfd, pid_t pid, json_t *json)
 {
     struct user_regs_struct regs = {0};
+    json_t *registers_val = NULL;
+    json_t *regval = NULL;
+
+    registers_val = json_object_get(json, "registers");
+    if (registers_val == NULL) {
+        send_status(sfd, -1);
+        return;
+    }
 
     if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) != 0) {
         perror("ptrace");
@@ -395,8 +398,45 @@ static void handle_set_registers(int sfd, pid_t pid, json_t *json)
         return;
     }
 
-    // TODO: Implment handle_set_registers
-    (void)json;
+#define get_register(regname) do {                          \
+        regval = json_object_get(registers_val, #regname);  \
+        if (regval != NULL) {                               \
+            regs.regname = json_integer_value(regval);      \
+        }                                                   \
+    } while (0)
+
+    get_register(rax);
+    get_register(rbx);
+    get_register(rcx);
+    get_register(rdx);
+    get_register(rsi);
+    get_register(rdi);
+    get_register(rsp);
+    get_register(rbp);
+    get_register(r8);
+    get_register(r9);
+    get_register(r10);
+    get_register(r11);
+    get_register(r12);
+    get_register(r13);
+    get_register(r14);
+    get_register(r15);
+    get_register(rip);
+    get_register(eflags);
+    get_register(cs);
+    get_register(ds);
+    get_register(es);
+    get_register(fs);
+    get_register(gs);
+    get_register(ss);
+    get_register(fs_base);
+    get_register(gs_base);
+
+    if (ptrace(PTRACE_SETREGS, pid, NULL, &regs) != 0) {
+        perror("ptrace");
+        send_status(sfd, errno);
+        return;
+    }
 
     send_status(sfd, 0);
 }

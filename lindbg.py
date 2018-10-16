@@ -119,8 +119,7 @@ class RemoteTarget(object):
 
         return response["modules"]
 
-    @property
-    def registers(self):
+    def get_registers(self):
         params = {"command": RemoteTarget.CMD_GET_REGISTERS}
         self._sendjson(params)
 
@@ -130,6 +129,18 @@ class RemoteTarget(object):
             return {}
 
         return response["registers"]
+
+    def set_registers(self, registers):
+        params = {"command": RemoteTarget.CMD_SET_REGISTERS,
+                  "registers": registers}
+        self._sendjson(params)
+
+        response = self._recvjson()
+        if (response is None or "status" not in response or
+                response["status"] != 0):
+            return False
+
+        return True
 
     def get_bytes(self, address, size):
         params = {"command": RemoteTarget.CMD_GET_BYTES,
@@ -196,9 +207,6 @@ class Breakpoint(object):
         self._enabled = False
         self._orig_byte = b""
 
-    def __del__(self):
-        self.disable()
-
     @property
     def address(self):
         return self._address
@@ -208,19 +216,22 @@ class Breakpoint(object):
         return self._enabled
 
     def enable(self):
-        if not self._enabled:
-            self._orig_byte = self._target.get_bytes(self._address, 1)
-            if len(self._orig_byte) != 1:
-                return False
-            self._target.set_bytes(self._address, b"\xcc")
-            self._enabled = True
+        self._enabled = True
 
     def disable(self):
-        if self._enabled:
-            success = self._target.set_bytes(self._address, self._orig_byte)
-            if success:
-                self._orig_byte = b""
-                self._enabled = False
+        self._enabled = False
+
+    def insert(self):
+        self._orig_byte = self._target.get_bytes(self._address, 1)
+        if len(self._orig_byte) != 1:
+            return False
+        self._target.set_bytes(self._address, b"\xcc")
+
+    def remove(self):
+        assert len(self._orig_byte) == 1
+        success = self._target.set_bytes(self._address, self._orig_byte)
+        if success:
+            self._orig_byte = b""
 
 
 class RdbShell(cmd.Cmd):
@@ -230,6 +241,59 @@ class RdbShell(cmd.Cmd):
         self._target = target
         self._breakpoints = []
         self.prompt = "0:000> "
+
+    def _insert_breakpoints(self):
+        """Helper function to insert all enabled breakpoints into the target."""
+        for bp in self._breakpoints:
+            if bp and bp.enabled:
+                bp.insert()
+
+    def _remove_breakpoints(self):
+        """Helper function to remove all enabled breakpoints from the target."""
+        for bp in self._breakpoints:
+            if bp and bp.enabled:
+                bp.remove()
+
+    def _breakpoint_exists(self, address):
+        """Helper function to determine if an enabled breakpoint exists at the given address."""
+        for bp in self._breakpoints:
+            if bp and bp.enabled and bp.address == address:
+                return True
+        return False
+
+    def _resume_target(self):
+        """Helper function to resume execution of the target.
+
+        This function handles breakpoints properly by inserting and removing them
+        as necessary. Additionally, it will fix up RIP if a breakpoint stops execution.
+        """
+        # if we're stopped on a breakpoint, we need to single-step past it before
+        # continuing execution.
+        regs = self._target.get_registers()
+        if self._breakpoint_exists(regs["rip"]):
+            exited, stopval = self._target.step_instruction()
+            if exited:
+                return exited, stopval
+
+            # if this instruction is also a breakpoint, we're done
+            regs = self._target.get_registers()
+            if self._breakpoint_exists(regs["rip"]):
+                return exited, stopval
+
+        # insert all breakpoints and continue
+        self._insert_breakpoints()
+        exited, stopval = self._target.go()
+        self._remove_breakpoints()
+        if exited:
+            return exited, stopval
+
+        # if we stopped due to a breakpoint, we need to reset RIP to RIP - 1
+        regs = self._target.get_registers()
+        if self._breakpoint_exists(regs["rip"] - 1):
+            regs["rip"] -= 1
+            self._target.set_registers(regs)
+
+        return exited, stopval
 
     def cmdloop(self, intro=""):
         """Override cmdloop to provide a custom intro."""
@@ -265,7 +329,7 @@ class RdbShell(cmd.Cmd):
 
     def do_r(self, arg):
         """The r command displays registers."""
-        regs = self._target.registers
+        regs = self._target.get_registers()
         if arg:
             if arg in regs:
                 print("{:s}={:016x}".format(arg, regs[arg]))
@@ -403,7 +467,7 @@ class RdbShell(cmd.Cmd):
                 print("Couldn't resolve error at '{:s}'".format(arg))
                 return
         else:
-            address = self._target.registers["rip"]
+            address = self._target.get_registers()["rip"]
 
         code = self._target.get_bytes(address, AMD64_MAX_INSTR_SIZE * 8)
 
@@ -430,15 +494,15 @@ class RdbShell(cmd.Cmd):
                 return
 
         # no previous breakpoint found for this address - create a new one
-        bp = Breakpoint(self._target, address)
-        bp.enable()
+        new_bp = Breakpoint(self._target, address)
+        new_bp.enable()
 
         # insert the breakpoint if there's a slot, otherwise append to the list
         for i, bp in enumerate(self._breakpoints):
             if bp is None:
-                self._breakpoints[i] = bp
+                self._breakpoints[i] = new_bp
                 return
-        self._breakpoints.append(bp)
+        self._breakpoints.append(new_bp)
 
     def do_be(self, arg):
         """The be command restores one or more breakpoints that were previously disabled."""
@@ -498,16 +562,20 @@ class RdbShell(cmd.Cmd):
     def do_p(self, arg):
         """The p command executes a single instruction. When subroutine calls occur, they are treated as a single step."""
         # check to see if the current instruction is a call
-        address = self._target.registers["rip"]
+        address = self._target.get_registers()["rip"]
         code = self._target.get_bytes(address, AMD64_MAX_INSTR_SIZE)
         md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
         inst = next(md.disasm(code, address))
 
         if inst.mnemonic == "call":
-            bp = Breakpoint(self._target, inst.address + inst.size)
-            bp.enable()
-            exited, stopval = self._target.go()
-            del bp
+            if self._breakpoint_exists(inst.address + inst.size):
+                exited, stopval = self._resume_target()
+            else:
+                bp = Breakpoint(self._target, inst.address + inst.size)
+                bp.enable()
+                self._breakpoints.append(bp)
+                exited, stopval = self._resume_target()
+                self._breakpoints.remove(bp)
         else:
             exited, stopval = self._target.step_instruction()
 
@@ -522,7 +590,7 @@ class RdbShell(cmd.Cmd):
 
     def do_g(self, arg):
         """The g command starts executing the given process or thread."""
-        exited, stopval = self._target.go()
+        exited, stopval = self._resume_target()
         if exited:
             print("[+] Target exited with value: {:d}".format(stopval))
 
