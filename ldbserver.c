@@ -1,13 +1,11 @@
 /**
  * TODO:
- *  - print next instruction on p, t, and g
+ *  - add support for signals in the child process
+ *  - set_bytes (client-side eb, ew, ed commands)
+ *  - set_registers (client-side r @eax=<val> commands)
  *
  *  - Check for allocation errors on json_* functions
  *  - python code check status retval in properties
- *
- *  - add support for signals in the child process
- *  - set_bytes (eb, ew, ed commands)
- *  - set_registers (r @eax=<val> commands)
  */
 #include <b64/cdecode.h>
 #include <b64/cencode.h>

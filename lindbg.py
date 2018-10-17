@@ -116,6 +116,8 @@ class RemoteTarget(object):
         for module in response["modules"]:
             module["start"] = int(module["start"], 16)
             module["end"] = int(module["end"], 16)
+            module["path"] = module["name"]
+            module["name"], _ = os.path.splitext(os.path.basename(module["path"]))
 
         return response["modules"]
 
@@ -242,6 +244,27 @@ class RdbShell(cmd.Cmd):
         self._breakpoints = []
         self.prompt = "0:000> "
 
+    def _print_next_instruction(self):
+        address = self._target.get_registers()["rip"]
+        code = self._target.get_bytes(address, AMD64_MAX_INSTR_SIZE)
+        md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+        inst = next(md.disasm(code, address))
+
+        # find the module we're currently executing in
+        modules = self._target.modules
+        modstr = None
+        for module in modules:
+            if module["start"] <= address < module["end"]:
+                modstr = "{:s}+0x{:x}:".format(module["name"], address - module["start"])
+        if not modstr:
+            modstr = "<unknown>+0x{:x}:".format(address)
+
+        inst_bytes = binascii.hexlify(inst.bytes).decode("ascii")
+        line = "{:08x}`{:08x} {:16s}{:8s}{:s}"
+        print(modstr)
+        print(line.format(inst.address >> 32, inst.address & 0xffffffff,
+                          inst_bytes, inst.mnemonic, inst.op_str))
+
     def _insert_breakpoints(self):
         """Helper function to insert all enabled breakpoints into the target."""
         for bp in self._breakpoints:
@@ -302,7 +325,7 @@ class RdbShell(cmd.Cmd):
             line = "ModLoad: {:08x}`{:08x} {:08x}`{:08x}   {:s}\n"
             intro += line.format(module["start"] >> 32, module["start"] & 0xffffffff,
                                  module["end"] >> 32, module["end"] & 0xffffffff,
-                                 module["name"])
+                                 module["path"])
 
         super().cmdloop(intro=intro)
 
@@ -319,12 +342,12 @@ class RdbShell(cmd.Cmd):
         """The lm command displays loaded modules."""
         print("start             end                 module name")
         for module in self._target.modules:
-            if "/" in module["name"]:
-                module["name"] = module["name"].split("/")[-1]
-            line = "{:08x}`{:08x} {:08x}`{:08x}   {:s}   (deferred)"
+            _, ext = os.path.splitext(module["path"])
+            extspace = " " * (len(ext) - 1)     # don't count the '.'
+            line = "{:08x}`{:08x} {:08x}`{:08x}   {:s}{:s}   (export symbols)       {:s}"
             line = line.format(module["start"] >> 32, module["start"] & 0xffffffff,
                                module["end"] >> 32, module["end"] & 0xffffffff,
-                               module["name"])
+                               module["name"], extspace, module["path"])
             print(line)
 
     def do_r(self, arg):
@@ -350,7 +373,7 @@ class RdbShell(cmd.Cmd):
     def do_da(self, arg):
         """Display ASCII characters."""
         try:
-            address = int(arg, 16)
+            address = int(arg.replace("`", ""), 16)
         except ValueError:
             print("Couldn't resolve error at '{:s}'".format(arg))
             return
@@ -375,7 +398,7 @@ class RdbShell(cmd.Cmd):
     def do_db(self, arg):
         """Display byte values and ASCII characters."""
         try:
-            address = int(arg, 16)
+            address = int(arg.replace("`", ""), 16)
         except ValueError:
             print("Couldn't resolve error at '{:s}'".format(arg))
             return
@@ -395,7 +418,7 @@ class RdbShell(cmd.Cmd):
     def do_dw(self, arg):
         """Display word values (2 bytes)."""
         try:
-            address = int(arg, 16)
+            address = int(arg.replace("`", ""), 16)
         except ValueError:
             print("Couldn't resolve error at '{:s}'".format(arg))
             return
@@ -417,7 +440,7 @@ class RdbShell(cmd.Cmd):
     def do_dd(self, arg):
         """Display double-word values (4 bytes)."""
         try:
-            address = int(arg, 16)
+            address = int(arg.replace("`", ""), 16)
         except ValueError:
             print("Couldn't resolve error at '{:s}'".format(arg))
             return
@@ -439,7 +462,7 @@ class RdbShell(cmd.Cmd):
     def do_dq(self, arg):
         """Display quad-word values (8 bytes)."""
         try:
-            address = int(arg, 16)
+            address = int(arg.replace("`", ""), 16)
         except ValueError:
             print("Couldn't resolve error at '{:s}'".format(arg))
             return
@@ -462,7 +485,7 @@ class RdbShell(cmd.Cmd):
         """The u command displays an assembly translation of the specified program code in memory."""
         if arg:
             try:
-                address = int(arg, 16)
+                address = int(arg.replace("`", ""), 16)
             except ValueError:
                 print("Couldn't resolve error at '{:s}'".format(arg))
                 return
@@ -481,7 +504,7 @@ class RdbShell(cmd.Cmd):
     def do_bp(self, arg):
         """The bp command sets a software breakpoint."""
         try:
-            address = int(arg, 16)
+            address = int(arg.replace("`", ""), 16)
         except ValueError:
             print("Couldn't resolve error at '{:s}'".format(arg))
             return
@@ -506,50 +529,50 @@ class RdbShell(cmd.Cmd):
 
     def do_be(self, arg):
         """The be command restores one or more breakpoints that were previously disabled."""
-        if arg:
+        if arg == "*":
+            # enable all breakpoints
+            for bp in self._breakpoints:
+                if bp:
+                    bp.enable()
+        elif arg:
             try:
-                idx = int(arg, 16)
+                idx = int(arg)
             except ValueError:
                 print("         ^ Syntax error in '{:s}'".format(arg))
                 return
             if 0 <= idx < len(self._breakpoints) and self._breakpoints[idx]:
                 self._breakpoints[idx].enable()
-        else:
-            # enable all breakpoints
-            for bp in self._breakpoints:
-                if bp:
-                    bp.enable()
 
     def do_bd(self, arg):
         """The bd command disables, but does not delete, previously set breakpoints."""
-        if arg:
+        if arg == "*":
+            # disable all breakpoints
+            for bp in self._breakpoints:
+                if bp:
+                    bp.disable()
+        elif arg:
             try:
-                idx = int(arg, 16)
+                idx = int(arg)
             except ValueError:
                 print("         ^ Syntax error in '{:s}'".format(arg))
                 return
             if 0 <= idx < len(self._breakpoints) and self._breakpoints[idx]:
                 self._breakpoints[idx].disable()
-        else:
-            # disable all breakpoints
-            for bp in self._breakpoints:
-                if bp:
-                    bp.disable()
 
     def do_bc(self, arg):
         """The bc command permanently removes previously set breakpoints from the system."""
-        if arg:
+        if arg == "*":
+            # clear all breakpoints
+            for i in range(len(self._breakpoints)):
+                self._breakpoints[i] = None
+        elif arg:
             try:
-                idx = int(arg, 16)
+                idx = int(arg)
             except ValueError:
                 print("         ^ Syntax error in '{:s}'".format(arg))
                 return
             if 0 <= idx < len(self._breakpoints) and self._breakpoints[idx]:
                 self._breakpoints[idx] = None
-        else:
-            # clear all breakpoints
-            for i in range(len(self._breakpoints)):
-                self._breakpoints[i] = None
 
     def do_bl(self, arg):
         """The bl command lists information about existing breakpoints."""
@@ -581,18 +604,24 @@ class RdbShell(cmd.Cmd):
 
         if exited:
             print("[+] Target exited with value: {:d}".format(stopval))
+        else:
+            self._print_next_instruction()
 
     def do_t(self, arg):
         """The t command executes a single instruction. When subroutine calls occur, each of their steps is also traced."""
         exited, stopval = self._target.step_instruction()
         if exited:
             print("[+] Target exited with value: {:d}".format(stopval))
+        else:
+            self._print_next_instruction()
 
     def do_g(self, arg):
         """The g command starts executing the given process or thread."""
         exited, stopval = self._resume_target()
         if exited:
             print("[+] Target exited with value: {:d}".format(stopval))
+        else:
+            self._print_next_instruction()
 
 
 def run_debug_session(ip, port):
