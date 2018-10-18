@@ -30,7 +30,7 @@ AMD64_MAX_INSTR_SIZE = 15
 
 INTRO_TEXT_FMT = textwrap.dedent("""\
 
-    Taco (R) Linux Debugger Version 0.1.0 AMD64
+    TwelveTacos (R) Linux Debugger Version 0.1.0 AMD64
     Copyright (c) Taco Corporation. All rights reserved.
 
     CommandLine: {:s}
@@ -236,7 +236,7 @@ class Breakpoint(object):
             self._orig_byte = b""
 
 
-class RdbShell(cmd.Cmd):
+class LindbgShell(cmd.Cmd):
 
     def __init__(self, target):
         super().__init__()
@@ -629,16 +629,16 @@ def run_debug_session(ip, port):
     s.connect((ip, port))
 
     target = RemoteTarget(s)
-    session = RdbShell(target)
+    session = LindbgShell(target)
     session.cmdloop()
 
 
 def main():
     parser = argparse.ArgumentParser(description="Start a remote debugging session")
     parser.add_argument("-i", "--ip", default="localhost",
-                        help="IP to listen on")
+                        help="IP to connect to")
     parser.add_argument("-p", "--port", default=4242,
-                        help="Port to listen on")
+                        help="Port to connect to")
 
     args = parser.parse_args()
 

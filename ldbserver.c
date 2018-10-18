@@ -1,12 +1,11 @@
 /**
- * TODO:
- *  - add support for signals in the child process
- *  - set_bytes (client-side eb, ew, ed commands)
- *  - set_registers (client-side r @eax=<val> commands)
+ * @brief Enable remote debugging of a hosted process.
  *
- *  - Check for allocation errors on json_* functions
- *  - python code check status retval in properties
+ * This program hosts a target process and waits for a debugger client to
+ * connect on the given IP and port. Once connected with a client, it enables
+ * debugging by providing functionality to interact with the target process.
  */
+
 #include <b64/cdecode.h>
 #include <b64/cencode.h>
 #include <jansson.h>
@@ -769,7 +768,7 @@ static int wait_for_connect(char *ip, char *port)
     addrinfo = NULL;
 
     if (addr == NULL) {
-        fprintf(stderr, "Invalid ip:port address\n");
+        fprintf(stderr, "Invalid host or port: '%s:%s'\n", ip, port);
         return -1;
     }
 
@@ -792,6 +791,14 @@ static int wait_for_connect(char *ip, char *port)
 __attribute__((noreturn)) static void usage_exit(char *program)
 {
     fprintf(stderr, "Usage: %s [-i IP] [-p PORT] <cmdline>\n", program);
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  Host a target for a remote debugger client.\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  Arguments:\n");
+    fprintf(stderr, "    <cmdline>    Command line for the target program\n");
+    fprintf(stderr, "    -i, --ip     IP address to listen on (default: localhost)\n");
+    fprintf(stderr, "    -p, --port   Port to listen on (default: 4242)\n");
+    fprintf(stderr, "    -h, --help   Show this help message\n");
     exit(EXIT_FAILURE);
 }
 
