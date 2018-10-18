@@ -102,7 +102,7 @@ you can interact with the target as if it were a local windbg session.
 
 There are a great number of windbg features not supported by `lindbg`. In
 addition to missing commands, many of the existing commands are not fully
-implmented. Some of the bigger missing features are listed here.
+implemented. Some of the bigger missing features are listed here.
 
 - Masm evaluator for expressions
 - Symbol resolution for identifiers in masm expressions

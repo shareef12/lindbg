@@ -706,7 +706,7 @@ static int start_debuggee(char **child_argv)
         _exit(EXIT_FAILURE);
     }
 
-    // parent - wait for the child to get SIGTERM after execv
+    // parent - wait for the child to get SIGTRAP after execv
     if (waitpid(pid, &status, 0) == -1) {
         kill(pid, SIGTERM);
         return -1;
